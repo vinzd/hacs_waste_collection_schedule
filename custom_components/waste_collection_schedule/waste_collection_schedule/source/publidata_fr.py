@@ -96,6 +96,11 @@ TEST_CASES = {
         "insee_code": "62193",
         "instance_id": 679,
     },
+    "Valcobreizh, Irodouër": {
+        "address": "1 rue de Rennes",
+        "insee_code": "35135",
+        "instance_id": "1003",
+    },
 }
 
 ICON_MAP = {
@@ -227,6 +232,11 @@ EXTRA_INFO = [
         "url": "https://www.grandcalais.fr/",
         "default_params": {"instance_id": 679},
     },
+    {
+        "title": "Valcobreizh",
+        "url": "https://dechets.valcobreizh.fr",
+        "default_params": {"instance_id": 1003},
+    },
 ]
 
 _CALENDAR_DAY_VERY_ABBR = {
@@ -353,12 +363,6 @@ class Source:
                 if garbage_type:
                     result[garbage_type] = {"schedules": source.get("schedules", {})}
         return result
-
-    def _parse_closure(self, schedule):
-        """Parse a closure schedule and return a daily rrule between the start and end dates."""
-        start_date = datetime.strptime(schedule["start_at"], "%Y-%m-%dT%H:%M:%S.%f%z")
-        end_date = datetime.strptime(schedule["end_at"], "%Y-%m-%dT%H:%M:%S.%f%z")
-        return rrule(freq=DAILY, dtstart=start_date, until=end_date)
 
     def _is_week_day(self, input_string):
         return any(day in input_string for day in _CALENDAR_DAY_VERY_ABBR)
@@ -489,13 +493,13 @@ class Source:
 
     def _parse_date_range(self, input_string):
         """Parse a date range such as "2024 Jan 01-2024 May 12" and return the corresponding kwargs to rrule constructor."""
-        start_date = datetime.strptime(input_string.split('-')[0], "%Y %b %d").astimezone(timezone.utc)
-        end_date = datetime.strptime(input_string.split('-')[1], "%Y %b %d").astimezone(timezone.utc)
+        start_date = datetime.strptime(input_string.split('-')[0] + " +0000", "%Y %b %d %z")
+        end_date = datetime.strptime(input_string.split('-')[1] + " +0000", "%Y %b %d %z")
         return {"dtstart": start_date, "until": end_date}
 
-    def _parse_regular(self, schedule):
+    def _parse_schedule(self, schedule):
         """
-        Parse a regular schedule and return a rrule object.
+        Parse a schedule and return a rrule object.
 
         Example input:
             "end_at": "2025-07-16T00:00:00.000+00:00",
@@ -513,6 +517,7 @@ class Source:
             "Feb,May,Aug,Nov Th[4] 05:00-12:00"
             "Tu 05:00-12:00"
             "2025 Jul 16 05:00-12:00"
+            "2025 Jul 16 off"
             "2025 Jan,Apr,Jul,Oct Tu[1] 05:00-12:00"
             "2024-2025 Mo 05:00-12:00"
             "2024-2025 Dec: We[2,4] 09:00-19:00"
@@ -528,7 +533,8 @@ class Source:
             if schedule["start_at"]
             else None
         )
-        if schedule["end_at"]:
+
+        if schedule["end_at"] and schedule["schedule_type"] != "regular": # publidata seems to somehow disregard this field
             end_date = datetime.strptime(schedule["end_at"], "%Y-%m-%dT%H:%M:%S.%f%z")
         else:
             end_date = datetime.now(timezone.utc) + timedelta(days=365)
@@ -551,6 +557,8 @@ class Source:
             if part == "week":
                 kwargs["freq"] = WEEKLY
                 kwargs.update(self._parse_week_no(parts.pop(0)))
+            elif part.startswith("off") or part.startswith('"'): # schedule should be of type "closed" or "closing_exception", or part should be a comment
+                continue
             else:
                 kwargs.update(self._parse_part(part))
 
@@ -565,14 +573,13 @@ class Source:
         entries = []
 
         sanitized_response = self._perform_query()
-
         for waste_type, waste_data in sanitized_response.items():
             my_rruleset = rruleset()
             for schedule in waste_data["schedules"]:
                 if schedule["schedule_type"] in ("regular", "exception"):
-                    my_rruleset.rrule(self._parse_regular(schedule))
+                    my_rruleset.rrule(self._parse_schedule(schedule))
                 elif schedule["schedule_type"] in ("closed", "closing_exception"):
-                    my_rruleset.exrule(self._parse_closure(schedule))
+                    my_rruleset.exrule(self._parse_schedule(schedule))
             for entry in my_rruleset:
                 entries.append(
                     Collection(
